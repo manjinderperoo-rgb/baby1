@@ -5,7 +5,6 @@ import time
 import random
 import logging
 import unicodedata
-import sqlite3
 import re
 from playwright.sync_api import sync_playwright
 import urllib.parse
@@ -41,41 +40,44 @@ logging.basicConfig(
 )
 
 user_fetching = set()
-user_cancel_fetch = set()
+user_cancel_fetch = set()  # new set
 AUTHORIZED_FILE = 'authorized_users.json'
 AUTHORIZED_GROUPS_FILE = 'authorized_groups.json'
 TASKS_FILE = 'tasks.json'
 OWNER_TG_ID = int(os.environ.get('OWNER_TG_ID'))
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-REQUIRED_CHANNEL = os.environ.get('REQUIRED_CHANNEL', '@techyspyther')  # Channel users must join
-REQUIRED_CHANNEL_ID = os.environ.get('REQUIRED_CHANNEL_ID')  # Channel ID for checking membership
+REQUIRED_CHANNEL = "@techyspyther"  # Channel users must join
 
-authorized_users = []
-authorized_groups = []
-users_data: Dict[int, Dict] = {}
-users_pending: Dict[int, Dict] = {}
-users_tasks: Dict[int, List[Dict]] = {}
-group_tasks: Dict[int, List[Dict]] = {}
+authorized_users = []  # list of {'id': int, 'username': str}
+authorized_groups = []  # list of group IDs (negative integers)
+users_data: Dict[int, Dict] = {}  # unlocked data {'accounts': list, 'default': int, 'pairs': dict or None, 'switch_minutes': int, 'threads': int}
+users_pending: Dict[int, Dict] = {}  # pending challenges
+users_tasks: Dict[int, List[Dict]] = {}  # tasks per user
+group_tasks: Dict[int, List[Dict]] = {}  # tasks per group (group_id -> list of tasks)
 persistent_tasks = []
 running_processes: Dict[int, subprocess.Popen] = {}
 waiting_for_otp = {}
 user_queues = {}
 user_fetching = set()
-gc_tasks_global = []
-MAX_GC_TASKS = 10
+gc_tasks_global = []  # Global GC tasks tracking
+MAX_GC_TASKS = 10  # Maximum tasks allowed in GC
 
+# Ensure sessions directory exists
 os.makedirs('sessions', exist_ok=True)
 
+# === PATCH: Fix instagrapi invalid timestamp bug ===
 def _sanitize_timestamps(obj):
+    """Fix invalid *_timestamp_us fields in Instagram data"""
     if isinstance(obj, dict):
         new_obj = {}
         for k, v in obj.items():
             if isinstance(v, int) and k.endswith("_timestamp_us"):
                 try:
-                    secs = int(v) // 1_000_000
+                    secs = int(v) // 1_000_000  # convert microseconds → seconds
                 except Exception:
                     secs = None
+                # skip impossible years (>2100 or negative)
                 if secs is None or secs < 0 or secs > 4102444800:
                     new_obj[k] = None
                 else:
@@ -88,70 +90,29 @@ def _sanitize_timestamps(obj):
     else:
         return obj
 
-def init_db():
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS channel_members (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS group_users (
-            group_id INTEGER,
-            user_id INTEGER,
-            username TEXT,
-            PRIMARY KEY (group_id, user_id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-init_db()
-
-def save_channel_member(user_id: int, username: str = ""):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO channel_members (user_id, username) 
-        VALUES (?, ?)
-    ''', (user_id, username))
-    conn.commit()
-    conn.close()
-
-def is_channel_member(user_id: int) -> bool:
-    if not REQUIRED_CHANNEL_ID:
-        return True
-        
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT user_id FROM channel_members WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result is not None
-
-def save_group_user(group_id: int, user_id: int, username: str = ""):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT OR REPLACE INTO group_users (group_id, user_id, username) 
-        VALUES (?, ?, ?)
-    ''', (group_id, user_id, username))
-    conn.commit()
-    conn.close()
+# === New Force Join Check ===
+async def is_channel_member(bot, user_id: int) -> bool:
+    """Check if user is a channel member using Telegram API"""
+    try:
+        member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        return member.status in ("member", "administrator", "creator")
+    except:
+        return False
 
 def load_authorized():
+    """Load authorized users and groups"""
     global authorized_users, authorized_groups
     
+    # Load authorized users
     if os.path.exists(AUTHORIZED_FILE):
         with open(AUTHORIZED_FILE, 'r') as f:
             authorized_users = json.load(f)
     
+    # Ensure owner is authorized
     if not any(u['id'] == OWNER_TG_ID for u in authorized_users):
         authorized_users.append({'id': OWNER_TG_ID, 'username': 'owner'})
     
+    # Load authorized groups
     if os.path.exists(AUTHORIZED_GROUPS_FILE):
         with open(AUTHORIZED_GROUPS_FILE, 'r') as f:
             authorized_groups = json.load(f)
@@ -160,36 +121,40 @@ def load_authorized():
         save_authorized_groups()
 
 def save_authorized():
+    """Save authorized users"""
     with open(AUTHORIZED_FILE, 'w') as f:
         json.dump(authorized_users, f)
 
 def save_authorized_groups():
+    """Save authorized groups"""
     with open(AUTHORIZED_GROUPS_FILE, 'w') as f:
         json.dump(authorized_groups, f)
 
 def is_authorized_group(group_id: int) -> bool:
+    """Check if group is authorized"""
     return group_id in authorized_groups
 
 def is_authorized_user(user_id: int) -> bool:
-    if any(u['id'] == user_id for u in authorized_users):
-        return True
-    
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-        SELECT DISTINCT gu.group_id 
-        FROM group_users gu 
-        WHERE gu.user_id = ? AND gu.group_id IN ({})
-    '''.format(','.join('?' * len(authorized_groups))), [user_id] + authorized_groups)
-    result = cursor.fetchone()
-    conn.close()
-    
-    return result is not None
+    """Check if user is authorized (individual only, since db removed)"""
+    return any(u['id'] == user_id for u in authorized_users)
 
 def is_owner(user_id: int) -> bool:
     return user_id == OWNER_TG_ID
 
+def get_user_mention(user: User) -> str:
+    """Get user mention for replies"""
+    if user.username:
+        return f"@{user.username}"
+    else:
+        return f"[{user.first_name or 'User'}](tg://user?id={user.id})"
+
 async def playwright_login_and_save_state(username: str, password: str, user_id: int) -> str:
+    """
+    Async Playwright login.
+    - Instagram me login karta hai
+    - storage_state ko sessions/<user>_<username>_state.json me save karta hai
+    - file path return karta hai
+    """
     COOKIE_FILE = f"sessions/{user_id}_{username}_state.json"
 
     async with async_playwright() as p:
@@ -204,7 +169,7 @@ async def playwright_login_and_save_state(username: str, password: str, user_id:
         )
 
         context = await browser.new_context(
-            user_agent=USER_AGENT,
+            user_agent=USER_AGENT,  # tumhara existing USER_AGENT
             viewport={"width": 1280, "height": 720},
         )
 
@@ -222,6 +187,7 @@ async def playwright_login_and_save_state(username: str, password: str, user_id:
             await page.title(),
         )
 
+        # ---------- CHECK LOGIN FORM ----------
         username_inputs = await page.locator('input[name="username"]').count()
         if username_inputs == 0:
             logging.warning(
@@ -232,6 +198,7 @@ async def playwright_login_and_save_state(username: str, password: str, user_id:
             username_inputs = await page.locator('input[name=\"username\"]').count()
 
         if username_inputs == 0:
+            # Still nahi mila → intro/splash
             html_snippet = (await page.content())[:1000].replace("\n", " ")
             logging.warning(
                 "[PLOGIN-ASYNC] Login form NOT loaded. URL=%s SNIPPET=%s",
@@ -241,30 +208,37 @@ async def playwright_login_and_save_state(username: str, password: str, user_id:
             await browser.close()
             raise ValueError("ERROR_010: Instagram login form not loaded (stuck on intro/splash)")
 
+        # ---------- HUMAN-LIKE LOGIN ----------
         username_input = page.locator('input[name="username"]')
         password_input = page.locator('input[name="password"]')
         login_button = page.locator('button[type="submit"]').first
 
+        # Username typing
         await username_input.click()
         await page.wait_for_timeout(random.randint(300, 900))
-        await username_input.fill("")
-        await username_input.type(username, delay=random.randint(60, 140))
+        await username_input.fill("")  # clear
+        await username_input.type(username, delay=random.randint(60, 140))  # ms per char
 
+        # Password typing
         await page.wait_for_timeout(random.randint(300, 900))
         await password_input.click()
         await page.wait_for_timeout(random.randint(200, 700))
         await password_input.fill("")
         await password_input.type(password, delay=random.randint(60, 140))
 
+        # Click login with tiny jitter
         await page.wait_for_timeout(random.randint(400, 1000))
         await login_button.click()
         logging.info("[PLOGIN-ASYNC] Submitted login form for %s", username)
 
+        # ---------- POST-LOGIN CHECK (OTP / SUCCESS) ----------
+        # Thoda time do redirect ke liye
         await page.wait_for_timeout(5000)
 
         current_url = page.url
         logging.info("[PLOGIN-ASYNC] After login URL=%s", current_url)
 
+        # Quick OTP detection without long timeout
         otp_locator = page.locator('input[name="verificationCode"]')
         otp_count = await otp_locator.count()
 
@@ -276,10 +250,16 @@ async def playwright_login_and_save_state(username: str, password: str, user_id:
                 otp_count,
             )
             await browser.close()
+            # Abhi ke liye clear error; baad me Telegram OTP flow hook kar sakte hain
             raise ValueError("ERROR_OTP: OTP / challenge required. Please use session/2FA flow.")
 
+        # Agar yahan tak aa gaye aur URL jaise:
+        # - /accounts/onetap/...
+        # - / (home feed, profile, etc.)
+        # to login successful maan lo
         logging.info("[PLOGIN-ASYNC] No OTP required, login looks successful. URL=%s", current_url)
 
+        # Kuch extra wait, phir state save
         await page.wait_for_timeout(4000)
 
         await context.storage_state(path=COOKIE_FILE)
@@ -290,6 +270,7 @@ async def playwright_login_and_save_state(username: str, password: str, user_id:
 
     return COOKIE_FILE
 
+# 🧩 Monkeypatch instagrapi to fix validation crash
 try:
     import instagrapi.extractors as extractors
     _orig_extract_reply_message = extractors.extract_reply_message
@@ -302,8 +283,14 @@ try:
     print("[Patch] Applied timestamp sanitizer to instagrapi extractors ✅")
 except Exception as e:
     print(f"[Patch Warning] Could not patch instagrapi: {e}")
+# === END PATCH ===
 
+# --- Playwright sync helper: run sync_playwright() inside a fresh thread ---
 def run_with_sync_playwright(fn, *args, **kwargs):
+    """
+    Runs `fn(p, *args, **kwargs)` where p is the object returned by sync_playwright()
+    inside a new thread and returns fn's return value (or raises exception).
+    """
     result = {"value": None, "exc": None}
 
     def target():
@@ -330,6 +317,7 @@ def load_users_data():
                 user_id = int(user_id_str)
                 with open(file, 'r') as f:
                     data = json.load(f)
+                # Defaults
                 if 'pairs' not in data:
                     data['pairs'] = None
                 if 'switch_minutes' not in data:
@@ -380,6 +368,7 @@ def get_storage_state_from_instagrapi(settings: Dict):
     cl = Client()
     cl.set_settings(settings)
 
+    # Collect cookies from instagrapi structures (compatible with multiple instagrapi versions)
     cookies_dict = {}
     if hasattr(cl, "session") and cl.session:
         try:
@@ -441,6 +430,7 @@ def list_group_chats(user_id, storage_state, username, password, max_groups=10, 
     updated = False
     new_state = None
 
+    # Load existing session if available
     if os.path.exists(session_file):
         try:
             cl.load_settings(session_file)
@@ -611,11 +601,13 @@ def perform_login(page, username, password):
         logging.error(f"Login failed: {str(e)}")
         raise
 
+# ---------------- Globals for PTY ----------------
 APP = None
 LOOP = None
 SESSIONS = {}
 SESSIONS_LOCK = threading.Lock()
 
+# ---------------- Child PTY login ----------------
 def child_login(user_id: int, username: str, password: str):
     cl = Client()
     username = username.strip().lower()
@@ -653,6 +645,7 @@ def child_login(user_id: int, username: str, password: str):
         time.sleep(0.5)
         sys.exit(0)
 
+# ---------------- PTY reader thread ----------------
 def reader_thread(user_id: int, chat_id: int, master_fd: int, username: str, password: str):
     global APP, LOOP
     buf = b""
@@ -713,14 +706,17 @@ def reader_thread(user_id: int, chat_id: int, master_fd: int, username: str, pas
                 data = users_data[user_id]
             else:
                 data = {'accounts': [], 'default': None, 'pairs': None, 'switch_minutes': 10, 'threads': 1}
+            # normalize incoming username
             norm_username = username.strip().lower()
 
             for i, acc in enumerate(data['accounts']):
                 if acc.get('ig_username', '').strip().lower() == norm_username:
+                    # overwrite existing entry for exact same username (normalized)
                     data['accounts'][i] = {'ig_username': norm_username, 'password': password, 'storage_state': state}
                     data['default'] = i
                     break
             else:
+                # not found -> append new normalized account
                 data['accounts'].append({'ig_username': norm_username, 'password': password, 'storage_state': state})
                 data['default'] = len(data['accounts']) - 1
             save_user_data(user_id, data)
@@ -743,6 +739,7 @@ def reader_thread(user_id: int, chat_id: int, master_fd: int, username: str, pas
                     pass
                 SESSIONS.pop(user_id, None)
 
+# ---------------- Relay input ----------------
 async def relay_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
@@ -770,8 +767,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text("❌ Invalid code. Please enter 6-digit code.")
             return
+    # Fallback to relay
     await relay_input(update, context)
 
+# ---------------- Kill command ----------------
 async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     with SESSIONS_LOCK:
@@ -793,6 +792,7 @@ async def cmd_kill(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SESSIONS.pop(user_id, None)
     await update.message.reply_text(f"🛑 Stopped login terminal (pid={pid}) successfully.")
 
+# ---------------- Flush command ----------------
 async def flush(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_owner(user_id):
@@ -806,6 +806,7 @@ async def flush(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await asyncio.sleep(3)
             if proc.poll() is None:
                 proc.kill()
+            # remove from runtime map if present
             pid = task.get('pid')
             if pid in running_processes:
                 running_processes.pop(pid, None)
@@ -818,23 +819,30 @@ async def flush(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             tasks.remove(task)
         users_tasks[uid] = tasks
     
+    # Clear GC tasks
     gc_tasks_global = []
     
     await update.message.reply_text("🛑 All tasks globally stopped! 🛑")
 
+# === NEW: Check if user can use bot ===
 async def can_use_bot(update: Update, context: ContextTypes.DEFAULT_TYPE, check_channel: bool = True) -> bool:
+    """Check if user can use the bot (authorization + channel membership)"""
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
     
+    # For private chat
     if chat_type == Chat.PRIVATE:
+        # Non-authorized users in DM can only use login commands
         if not is_authorized_user(user_id):
+            # Check if command is a login command
             command = update.message.text.split()[0] if update.message.text else ""
             login_commands = ['/login', '/plogin', '/slogin', '/start']
             if command not in login_commands:
                 await update.message.reply_text("⚠️ This bot can be used in authorized groups only. ⚠️")
                 return False
             
-            if check_channel and not is_channel_member(user_id):
+            # For login commands in DM, check channel membership
+            if check_channel and not await is_channel_member(context.bot, user_id):
                 await update.message.reply_text(
                     f"❌ Please join {REQUIRED_CHANNEL} and try again! ❌\n\n"
                     f"Join here: {REQUIRED_CHANNEL}\n"
@@ -843,7 +851,8 @@ async def can_use_bot(update: Update, context: ContextTypes.DEFAULT_TYPE, check_
                 return False
             return True
         
-        if check_channel and not is_channel_member(user_id):
+        # Authorized users in DM must be channel members
+        if check_channel and not await is_channel_member(context.bot, user_id):
             await update.message.reply_text(
                 f"❌ Please join {REQUIRED_CHANNEL} and try again! ❌\n\n"
                 f"Join here: {REQUIRED_CHANNEL}\n"
@@ -852,27 +861,43 @@ async def can_use_bot(update: Update, context: ContextTypes.DEFAULT_TYPE, check_
             return False
         return True
     
+    # For group chat
     elif chat_type in [Chat.GROUP, Chat.SUPERGROUP]:
         group_id = update.effective_chat.id
         
+        # Check if group is authorized
         if not is_authorized_group(group_id):
             await update.message.reply_text("⚠️ This group is not authorized to use the bot. ⚠️")
             return False
         
-        save_group_user(group_id, user_id, update.effective_user.username)
-        
-        if check_channel and not is_channel_member(user_id):
+        # Check channel membership for group users
+        if check_channel and not await is_channel_member(context.bot, user_id):
+            user_mention = get_user_mention(update.effective_user)
             await update.message.reply_text(
-                f"❌ Please join {REQUIRED_CHANNEL} and try again! ❌\n\n"
+                f"{user_mention} ❌ Please join {REQUIRED_CHANNEL} and try again! ❌\n\n"
                 f"Join here: {REQUIRED_CHANNEL}\n"
-                "After joining, run command again."
+                "After joining, run command again.",
+                parse_mode=ParseMode.MARKDOWN
             )
             return False
         return True
     
     return False
 
+# === NEW: Reply with mention in groups ===
+async def reply_with_mention(update: Update, text: str):
+    """Reply with user mention in groups"""
+    user_mention = get_user_mention(update.effective_user)
+    
+    if update.effective_chat.type == Chat.PRIVATE:
+        await update.message.reply_text(text)
+    else:
+        await update.message.reply_text(f"{user_mention} {text}", parse_mode=ParseMode.MARKDOWN)
+
+# === NEW: Check GC task limits ===
 def check_gc_task_limits(user_id: int, group_id: int) -> tuple:
+    """Check if user can start a new task in GC"""
+    # Check user's existing tasks
     user_task_count = 0
     for task in gc_tasks_global:
         if task['user_id'] == user_id:
@@ -881,6 +906,7 @@ def check_gc_task_limits(user_id: int, group_id: int) -> tuple:
     if user_task_count >= 1:
         return False, "⚠️ Only 1 task allowed per user. To buy paid IG spam bot DM @spyther ⚠️"
     
+    # Check global task limit
     if len(gc_tasks_global) >= MAX_GC_TASKS:
         return False, f"⚠️ {MAX_GC_TASKS}/{MAX_GC_TASKS} tasks are currently running. Please wait. ⚠️"
     
@@ -895,9 +921,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
     
-    if chat_type == Chat.PRIVATE:
-        save_channel_member(user_id, update.effective_user.username)
-    
     welcome_text = "👋 Welcome to Spyther's spam bot ⚡\n\n"
     
     if chat_type == Chat.PRIVATE:
@@ -907,11 +930,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             welcome_text += "ℹ️ You can use login commands here. For full access, join an authorized group.\n"
             welcome_text += "Type /help to see available commands"
     else:
-        welcome_text += "ℹ️ This bot works in authorized groups."
+        welcome_text += "ℹ️ This bot works in authorized groups. Make sure to mention the bot when using commands."
     
-    await update.message.reply_text(welcome_text)
+    await reply_with_mention(update, welcome_text)
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
@@ -942,6 +966,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     help_text += " /kill 🛑 - Kill active login session\n"
     help_text += " /usg 📊 - System usage\n"
     
+    if chat_type != Chat.PRIVATE:
+        help_text += "\nℹ️ Note: In groups, mention the bot or reply to its messages for commands.\n"
+        help_text += "Example: `@{} /help`".format(context.bot.username)
+    
     if is_owner(user_id):
         help_text += "\n\nAdmin commands: 👑\n"
         help_text += " /add ➕ <tg_id> - Add authorized user or group\n"
@@ -949,23 +977,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         help_text += " /users 📜 - List authorized users and groups\n"
         help_text += " /flush 🧹 - Stop all tasks globally\n"
     
-    await update.message.reply_text(help_text)
+    await reply_with_mention(update, help_text)
 
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Check authorization and channel
     if not await can_use_bot(update, context, check_channel=False):
         return ConversationHandler.END
     
     chat_type = update.effective_chat.type
     if chat_type != Chat.PRIVATE:
-        await update.message.reply_text("🔒 For safety, please login in bot's DM. 🔒")
+        await reply_with_mention(update, "🔒 For safety, please login in bot's DM. 🔒")
         return ConversationHandler.END
     
-    await update.message.reply_text("📱 Enter Instagram username: 📱")
+    await reply_with_mention(update, "📱 Enter Instagram username: 📱")
     return USERNAME
 
 async def get_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Normalize username: remove surrounding spaces and lowercase
     context.user_data['ig_username'] = update.message.text.strip().lower()
-    await update.message.reply_text("🔒 Enter password: 🔒")
+    await reply_with_mention(update, "🔒 Enter password: 🔒")
     return PASSWORD
 
 async def get_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -976,7 +1006,7 @@ async def get_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     
     with SESSIONS_LOCK:
         if user_id in SESSIONS:
-            await update.message.reply_text("⚠️ PTY session already running. Use /kill first.")
+            await reply_with_mention(update, "⚠️ PTY session already running. Use /kill first.")
             return ConversationHandler.END
 
     pid, master_fd = pty.fork()
@@ -996,21 +1026,23 @@ async def get_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         
     return ConversationHandler.END
 
+# --- /plogin handlers (ASYNC, NO THREAD) ---
 async def plogin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Check authorization and channel
     if not await can_use_bot(update, context, check_channel=False):
         return ConversationHandler.END
     
     chat_type = update.effective_chat.type
     if chat_type != Chat.PRIVATE:
-        await update.message.reply_text("🔒 For safety, please login in bot's DM. 🔒")
+        await reply_with_mention(update, "🔒 For safety, please login in bot's DM. 🔒")
         return ConversationHandler.END
     
-    await update.message.reply_text("🔐 Enter Instagram username for Playwright login: ")
+    await reply_with_mention(update, "🔐 Enter Instagram username for Playwright login: ")
     return PLO_USERNAME
 
 async def plogin_get_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['pl_username'] = update.message.text.strip().lower()
-    await update.message.reply_text("🔒 Enter password: 🔒")
+    await reply_with_mention(update, "🔒 Enter password: 🔒")
     return PLO_PASSWORD
 
 async def plogin_get_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1019,17 +1051,20 @@ async def plogin_get_password(update: Update, context: ContextTypes.DEFAULT_TYPE
     username = context.user_data['pl_username']
     password = update.message.text.strip()
 
-    await update.message.reply_text("🔄 Starting Playwright login... (async, no threads)")
+    await reply_with_mention(update, "🔄 Starting Playwright login... (async, no threads)")
 
     try:
+        # 1) Playwright se login + storage_state save
         state_file = await playwright_login_and_save_state(username, password, user_id)
 
+        # 2) JSON state load karke Instagrapi me convert karo (tumhara purana logic reuse)
         logging.info("[PLOGIN] Loading storage_state from %s", state_file)
         state = json.load(open(state_file))
 
         cookies = [c for c in state.get('cookies', []) if c.get('domain') == '.instagram.com']
         logging.info("[PLOGIN] cookies for .instagram.com = %s", len(cookies))
 
+        # Extract sessionid cookie (Playwright → Instagrapi)
         sessionid = None
         for c in cookies:
             if c.get("name") == "sessionid":
@@ -1043,12 +1078,14 @@ async def plogin_get_password(update: Update, context: ContextTypes.DEFAULT_TYPE
         cl = Client()
         logging.info("[PLOGIN] Logging into Instagrapi using sessionid (len=%s)", len(sessionid))
 
+        # Instagrapi new valid method
         cl.login_by_sessionid(sessionid)
 
         session_file = f"sessions/{user_id}_{username}_session.json"
         logging.info("[PLOGIN] Dumping Instagrapi settings to %s", session_file)
         cl.dump_settings(session_file)
 
+        # 3) users_data update (same tumhara code)
         logging.info("[PLOGIN] Updating users_data for user_id=%s", user_id)
         if user_id not in users_data:
             users_data[user_id] = {
@@ -1082,29 +1119,33 @@ async def plogin_get_password(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         save_user_data(user_id, data)
 
-        await update.message.reply_text("✅ Playwright login successful! Sessions saved. 🎉")
+        await reply_with_mention(update, "✅ Playwright login successful! Sessions saved. 🎉")
 
     except ValueError as ve:
         err_msg = str(ve)
         logging.error("[PLOGIN] ValueError: %s", err_msg)
-        await update.message.reply_text(f"❌ Login failed: {err_msg}")
+
+        # Specific errors like ERROR_010, ERROR_OTP, timeouts etc
+        await reply_with_mention(update, f"❌ Login failed: {err_msg}")
 
     except Exception as e:
         logging.exception("[PLOGIN] Unexpected exception in plogin_get_password")
-        await update.message.reply_text(f"❌ Unexpected error: {e}")
+        await reply_with_mention(update, f"❌ Unexpected error: {e}")
 
     return ConversationHandler.END
 
+# --- /slogin handlers ---
 async def slogin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Check authorization and channel
     if not await can_use_bot(update, context, check_channel=False):
         return ConversationHandler.END
     
     chat_type = update.effective_chat.type
     if chat_type != Chat.PRIVATE:
-        await update.message.reply_text("🔒 For safety, please login in bot's DM. 🔒")
+        await reply_with_mention(update, "🔒 For safety, please login in bot's DM. 🔒")
         return ConversationHandler.END
     
-    await update.message.reply_text("🔑 Enter session ID: ")
+    await reply_with_mention(update, "🔑 Enter session ID: ")
     return SLOG_SESSION
 
 async def slogin_get_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1116,15 +1157,15 @@ async def slogin_get_session(update: Update, context: ContextTypes.DEFAULT_TYPE)
         cl.login_by_sessionid(sessionid)
         cl.dump_settings(temp_file)
         context.user_data['temp_session_file'] = temp_file
-        await update.message.reply_text("✅ Valid session ID! 📝 Enter username to save:")
+        await reply_with_mention(update, "✅ Valid session ID! 📝 Enter username to save:")
         return SLOG_USERNAME
     except LoginRequired:
         os.remove(temp_file) if os.path.exists(temp_file) else None
-        await update.message.reply_text("❌ Invalid session ID.")
+        await reply_with_mention(update, "❌ Invalid session ID.")
         return ConversationHandler.END
     except Exception as e:
         os.remove(temp_file) if os.path.exists(temp_file) else None
-        await update.message.reply_text(f"❌ Error validating session: {str(e)}")
+        await reply_with_mention(update, f"❌ Error validating session: {str(e)}")
         return ConversationHandler.END
 
 async def slogin_get_username(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1135,12 +1176,14 @@ async def slogin_get_username(update: Update, context: ContextTypes.DEFAULT_TYPE
     os.makedirs('sessions', exist_ok=True)
     os.rename(temp_file, session_file)
 
+    # Generate playwright state
     settings = json.load(open(session_file))
     state = get_storage_state_from_instagrapi(settings)
     playwright_file = f"sessions/{user_id}_{username}_state.json"
     with open(playwright_file, 'w') as f:
         json.dump(state, f)
 
+    # Save to user data
     if user_id not in users_data:
         users_data[user_id] = {'accounts': [], 'default': None, 'pairs': None, 'switch_minutes': 10, 'threads': 1}
         save_user_data(user_id, users_data[user_id])
@@ -1148,7 +1191,7 @@ async def slogin_get_username(update: Update, context: ContextTypes.DEFAULT_TYPE
     found = False
     for i, acc in enumerate(data['accounts']):
         if acc.get('ig_username', '').strip().lower() == username:
-            acc['password'] = ''
+            acc['password'] = ''  # No password for session
             acc['storage_state'] = state
             data['default'] = i
             found = True
@@ -1158,65 +1201,65 @@ async def slogin_get_username(update: Update, context: ContextTypes.DEFAULT_TYPE
         data['default'] = len(data['accounts']) - 1
     save_user_data(user_id, data)
 
-    await update.message.reply_text(f"✅ Session saved for {username}! Playwright & Instagrapi files created. 🎉")
+    await reply_with_mention(update, f"✅ Session saved for {username}! Playwright & Instagrapi files created. 🎉")
     return ConversationHandler.END
 
 async def viewmyac(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if user_id not in users_data:
-        await update.message.reply_text("❌ You haven't saved any account. Use /login to save one. ❌")
+        await reply_with_mention(update, "❌ You haven't saved any account. Use /login to save one. ❌")
         return
     data = users_data[user_id]
     msg = "👀 Your saved account list 👀\n"
     for i, acc in enumerate(data['accounts']):
         default = " (default) ⭐" if data['default'] == i else ""
         msg += f"{i+1}. {acc['ig_username']}{default}\n"
-    await update.message.reply_text(msg)
+    await reply_with_mention(update, msg)
 
 async def setig(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("❗ Usage: /setig <number> ❗")
+        await reply_with_mention(update, "❗ Usage: /setig <number> ❗")
         return
     num = int(context.args[0]) - 1
-    if user_id not in users_data:
-        await update.message.reply_text("❌ No accounts saved. ❌")
+    if user_id not in users_data or num < 0 or num >= len(users_data[user_id]['accounts']):
+        await reply_with_mention(update, "⚠️ Invalid number. Use /viewmyac. ⚠️")
         return
     data = users_data[user_id]
-    if num < 0 or num >= len(data['accounts']):
-        await update.message.reply_text("⚠️ Invalid number. ⚠️")
-        return
     data['default'] = num
     save_user_data(user_id, data)
-    acc = data['accounts'][num]['ig_username']
-    await update.message.reply_text(f"✅ {num+1}. {acc} now is your default account. ⭐")
+    await reply_with_mention(update, f"✅ Set default to {num+1}. ⭐")
 
 async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if not context.args:
-        await update.message.reply_text("❗ Usage: /logout <username> ❗")
+        await reply_with_mention(update, "❗ Usage: /logout <username> ❗")
         return
-    username = context.args[0].strip()
-    if user_id not in users_data:
-        await update.message.reply_text("❌ No accounts saved. ❌")
+    username = context.args[0].strip().lower()
+    if user_id not in users_data or not users_data[user_id]['accounts']:
+        await reply_with_mention(update, "❌ No accounts saved. ❌")
         return
     data = users_data[user_id]
     for i, acc in enumerate(data['accounts']):
-        if acc['ig_username'] == username:
+        if acc['ig_username'].strip().lower() == username:
             del data['accounts'][i]
             if data['default'] == i:
                 data['default'] = 0 if data['accounts'] else None
             elif data['default'] > i:
                 data['default'] -= 1
+            # Update pairs if exists
             if data['pairs']:
                 pl = data['pairs']['list']
                 if username in pl:
@@ -1227,7 +1270,7 @@ async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         data['pairs']['default_index'] = 0
             break
     else:
-        await update.message.reply_text("⚠️ Account not found. ⚠️")
+        await reply_with_mention(update, "⚠️ Account not found. ⚠️")
         return
     save_user_data(user_id, data)
     session_file = f"sessions/{user_id}_{username}_session.json"
@@ -1236,72 +1279,78 @@ async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         os.remove(session_file)
     if os.path.exists(state_file):
         os.remove(state_file)
-    await update.message.reply_text(f"✅ Logged out and removed {username}. Files deleted. ✅")
+    await reply_with_mention(update, f"✅ Logged out and removed {username}. Files deleted. ✅")
 
 async def pair_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if not context.args:
-        await update.message.reply_text("❗ Usage: /pair iguser1-iguser2-iguser3 ❗")
+        await reply_with_mention(update, "❗ Usage: /pair iguser1-iguser2-iguser3 ❗")
         return
     arg_str = '-'.join(context.args)
     us = [u.strip() for u in arg_str.split('-') if u.strip()]
     if len(us) < 2:
-        await update.message.reply_text("❗ Provide at least one more account. ❗")
+        await reply_with_mention(update, "❗ Provide at least one more account. ❗")
         return
     if user_id not in users_data or not users_data[user_id]['accounts']:
-        await update.message.reply_text("❌ No accounts saved. Use /login first. ❌")
+        await reply_with_mention(update, "❌ No accounts saved. Use /login first. ❌")
         return
     data = users_data[user_id]
     accounts_set = {acc['ig_username'] for acc in data['accounts']}
     missing = [u for u in us if u not in accounts_set]
     if missing:
-        await update.message.reply_text(f"⚠️ Can't find that account: {missing[0]}. Save it again with /login. ⚠️")
+        await reply_with_mention(update, f"⚠️ Can't find that account: {missing[0]}. Save it again with /login. ⚠️")
         return
     data['pairs'] = {'list': us, 'default_index': 0}
+    # Set default to first in pair
     first_u = us[0]
     for i, acc in enumerate(data['accounts']):
         if acc['ig_username'] == first_u:
             data['default'] = i
             break
     save_user_data(user_id, data)
-    await update.message.reply_text(f"✅ Pair created! {len(us)} accounts saved.\nDefault: {first_u} ⭐\nUse /attack to start sending messages with pairing & switching.")
+    await reply_with_mention(update, f"✅ Pair created! {len(us)} accounts saved.\nDefault: {first_u} ⭐\nUse /attack to start sending messages with pairing & switching.")
 
 async def unpair_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if user_id not in users_data or not users_data[user_id].get('pairs'):
-        await update.message.reply_text("❌ No active pair found. Use /pair first. ❌")
+        await reply_with_mention(update, "❌ No active pair found. Use /pair first. ❌")
         return
 
     data = users_data[user_id]
     pair_info = data['pairs']
     pair_list = pair_info['list']
 
+    # --- no arguments case ---
     if not context.args:
         msg = "👥 Current pair list:\n"
         for i, u in enumerate(pair_list, 1):
             mark = "⭐" if i - 1 == pair_info.get('default_index', 0) else ""
             msg += f"{i}. {u} {mark}\n"
         msg += "\nUse `/unpair all` to remove all pairs or `/unpair <username>` to remove one."
-        await update.message.reply_text(msg)
+        await reply_with_mention(update, msg)
         return
 
     arg = context.args[0].strip().lower()
 
+    # --- unpair all ---
     if arg == "all":
         data['pairs'] = None
         save_user_data(user_id, data)
-        await update.message.reply_text("🧹 All paired accounts removed successfully.")
+        await reply_with_mention(update, "🧹 All paired accounts removed successfully.")
         return
 
+    # --- unpair specific account ---
     target = arg
     if target not in pair_list:
-        await update.message.reply_text(f"⚠️ {target} is not in current pair list. ⚠️")
+        await reply_with_mention(update, f"⚠️ {target} is not in current pair list. ⚠️")
         return
 
     pair_list.remove(target)
@@ -1309,50 +1358,55 @@ async def unpair_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         data['pairs'] = None
         msg = f"✅ Removed {target}. No pairs left."
     else:
+        # adjust default index if needed
         if pair_info.get('default_index', 0) >= len(pair_list):
             pair_info['default_index'] = 0
         msg = f"✅ Removed {target}. Remaining pairs: {', '.join(pair_list)}"
 
     save_user_data(user_id, data)
-    await update.message.reply_text(msg)
+    await reply_with_mention(update, msg)
 
 async def switch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("❗ Usage: /switch <minutes> ❗")
+        await reply_with_mention(update, "❗ Usage: /switch <minutes> ❗")
         return
     min_ = int(context.args[0])
     data = users_data[user_id]
     if not data.get('pairs') or len(data['pairs']['list']) < 2:
-        await update.message.reply_text("⚠️ No pair found. Use /pair first. ⚠️")
+        await reply_with_mention(update, "⚠️ No pair found. Use /pair first. ⚠️")
         return
     if min_ < 5:
-        await update.message.reply_text("⚠️ Minimum switch interval is 5 minutes. ⚠️")
+        await reply_with_mention(update, "⚠️ Minimum switch interval is 5 minutes. ⚠️")
         return
     data['switch_minutes'] = min_
     save_user_data(user_id, data)
-    await update.message.reply_text(f"⏱️ Switch interval set to {min_} minutes.")
+    await reply_with_mention(update, f"⏱️ Switch interval set to {min_} minutes.")
 
 async def threads_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if not context.args or not context.args[0].isdigit():
-        await update.message.reply_text("❗ Usage: /threads <1-5> ❗")
+        await reply_with_mention(update, "❗ Usage: /threads <1-5> ❗")
         return
     n = int(context.args[0])
     
+    # Different limits for DM vs GC
     if update.effective_chat.type == Chat.PRIVATE:
         if n < 1 or n > 5:
-            await update.message.reply_text("⚠️ threads must be between 1 and 5. ⚠️")
+            await reply_with_mention(update, "⚠️ threads must be between 1 and 5. ⚠️")
             return
     else:
+        # In groups, only 1 thread allowed
         if n != 1:
-            await update.message.reply_text("⚠️ /threads unavailable for authorized GCs, only 1 thread is allowed per user. To buy full speed threads, bot DM @spyther ⚠️")
+            await reply_with_mention(update, "⚠️ /threads unavailable for authorized GCs, only 1 thread is allowed per user. To buy full speed threads, bot DM @spyther ⚠️")
             n = 1
     
     if user_id not in users_data:
@@ -1361,15 +1415,16 @@ async def threads_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = users_data[user_id]
     data['threads'] = n
     save_user_data(user_id, data)
-    await update.message.reply_text(f"🔁 Threads set to {n}.")
+    await reply_with_mention(update, f"🔁 Threads set to {n}.")
 
 async def viewpref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if user_id not in users_data:
-        await update.message.reply_text("❌ No data. Use /login. ❌")
+        await reply_with_mention(update, "❌ No data. Use /login. ❌")
         return
     data = users_data[user_id]
     saved_accounts = ', '.join([acc['ig_username'] for acc in data['accounts']])
@@ -1387,10 +1442,11 @@ async def viewpref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     threads = data.get('threads', 1)
     msg += f"🧵 Threads: {threads}\n"
     msg += f"👤 Saved accounts: {saved_accounts}\n"
+    # Check running attacks
     tasks = users_tasks.get(user_id, [])
     running_attacks = [t for t in tasks if t.get('type') == 'message_attack' and t['status'] == 'running' and t['proc'].poll() is None]
     if running_attacks:
-        task = running_attacks[0]
+        task = running_attacks[0]  # Assume one
         pid = task['pid']
         ttype = task['target_type']
         tdisplay = task['target_display']
@@ -1405,27 +1461,29 @@ async def viewpref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 msg += f"using - {u}\n"
             else:
                 msg += f"cooldown - {u}\n"
-    await update.message.reply_text(msg)
+    await reply_with_mention(update, msg)
 
 async def attack_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return ConversationHandler.END
     
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
     
+    # Check GC task limits
     if chat_type != Chat.PRIVATE:
         group_id = update.effective_chat.id
         can_start, msg = check_gc_task_limits(user_id, group_id)
         if not can_start:
-            await update.message.reply_text(msg)
+            await reply_with_mention(update, msg)
             return ConversationHandler.END
     
     if user_id not in users_data or not users_data[user_id]['accounts']:
         if chat_type == Chat.PRIVATE:
-            await update.message.reply_text("❗ Please /login first. ❗")
+            await reply_with_mention(update, "❗ Please /login first. ❗")
         else:
-            await update.message.reply_text("❗ You haven't saved any account yet, DM the bot and login with the following commands: /login /plogin /slogin. The faster and safer method is session ID. ❗")
+            await reply_with_mention(update, "❗ You haven't saved any account yet, DM the bot and login with the following commands: /login /plogin /slogin. The faster and safer method is session ID. ❗")
         return ConversationHandler.END
     
     data = users_data[user_id]
@@ -1433,7 +1491,7 @@ async def attack_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         data['default'] = 0
         save_user_data(user_id, data)
     
-    await update.message.reply_text("Where you want to send msgs ? dm or gc")
+    await reply_with_mention(update, "Where you want to send msgs ? dm or gc")
     return MODE
 
 async def get_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1443,7 +1501,7 @@ async def get_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     if 'dm' in text:
         context.user_data['mode'] = 'dm'
-        await update.message.reply_text("Enter target username (for DM):")
+        await reply_with_mention(update, "Enter target username (for DM):")
         return TARGET
 
     elif 'gc' in text:
@@ -1452,51 +1510,15 @@ async def get_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
         user_fetching.add(user_id)
         try:
-            # FIXED: Use sync_playwright instead of instagrapi for GC fetching
-            from playwright.sync_api import sync_playwright
-            
-            def fetch_groups_with_playwright():
-                with sync_playwright() as p:
-                    browser = p.chromium.launch(headless=True)
-                    context = browser.new_context(storage_state=acc['storage_state'])
-                    page = context.new_page()
-                    
-                    page.goto("https://www.instagram.com/direct/inbox/", wait_until="domcontentloaded")
-                    time.sleep(3)
-                    
-                    # Click on group filter if available
-                    try:
-                        page.click('button:has-text("Groups")', timeout=5000)
-                        time.sleep(2)
-                    except:
-                        pass
-                    
-                    # Extract group threads
-                    groups = []
-                    thread_elements = page.query_selector_all('a[href*="/direct/t/"]')
-                    
-                    for elem in thread_elements[:10]:
-                        try:
-                            href = elem.get_attribute('href')
-                            if 'direct/t' in href:
-                                display = elem.text_content() or "Group Chat"
-                                if display and len(display) > 0 and "message" not in display.lower():
-                                    groups.append({
-                                        'display': display[:50],
-                                        'url': f"https://www.instagram.com{href}"
-                                    })
-                        except:
-                            continue
-                    
-                    browser.close()
-                    return groups, acc['storage_state']
-            
-            groups, new_state = await asyncio.to_thread(fetch_groups_with_playwright)
-            
-        except Exception as e:
-            logging.error(f"Error fetching groups: {e}")
-            groups = []
-            new_state = acc['storage_state']
+            groups, new_state = await asyncio.to_thread(
+                list_group_chats,
+                user_id,
+                acc['storage_state'],
+                acc['ig_username'],
+                acc['password'],
+                max_groups=10,
+                amount=10
+            )
         finally:
             user_fetching.discard(user_id)
             try:
@@ -1504,9 +1526,10 @@ async def get_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             except:
                 pass
 
+        # ✅ Agar beech me /cancel aaya tha to result ignore karo
         if user_id in user_cancel_fetch:
             user_cancel_fetch.discard(user_id)
-            await update.message.reply_text("❌ Fetching cancelled. Ignoring result. ❌")
+            await reply_with_mention(update, "❌ Fetching cancelled. Ignoring result. ❌")
             return ConversationHandler.END
 
         if new_state != acc['storage_state']:
@@ -1517,18 +1540,18 @@ async def get_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         context.user_data['mode'] = 'gc'
 
         if not groups:
-            await update.message.reply_text("❌ No group chats found or couldn't access inbox. Try logging in again. ❌")
+            await reply_with_mention(update, "❌ No group chats found. ❌")
             return ConversationHandler.END
 
         msg = "🔢 Select a GC by number: 🔢\n"
         for i, g in enumerate(groups):
             msg += f"{i+1}. {g['display']}\n"
 
-        await update.message.reply_text(msg)
+        await reply_with_mention(update, msg)
         return SELECT_GC
 
     else:
-        await update.message.reply_text("Please reply with 'dm' or 'gc'")
+        await reply_with_mention(update, "Please reply with 'dm' or 'gc'")
         return MODE
 
 async def select_gc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1541,20 +1564,20 @@ async def select_gc_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             g = groups[num]
             context.user_data['thread_url'] = g['url']
             context.user_data['target_display'] = g['display']
-            await update.message.reply_text("Send messages like: msg1 & msg2 & msg3 or upload .txt file")
+            await reply_with_mention(update, "Send messages like: msg1 & msg2 & msg3 or upload .txt file")
             return MESSAGES
         else:
-            await update.message.reply_text("⚠️ Invalid number. Please select 1-{}. ⚠️".format(len(groups)))
+            await reply_with_mention(update, "⚠️ Invalid number. Please select 1-{}. ⚠️".format(len(groups)))
             return SELECT_GC
     except ValueError:
-        await update.message.reply_text("⚠️ Please send a number. ⚠️")
+        await reply_with_mention(update, "⚠️ Please send a number. ⚠️")
         return SELECT_GC
 
 async def get_target_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     target_u = update.message.text.strip().lstrip('@')
     if not target_u:
-        await update.message.reply_text("⚠️ Invalid username. ⚠️")
+        await reply_with_mention(update, "⚠️ Invalid username. ⚠️")
         return TARGET
     context.user_data['target_display'] = target_u
     data = users_data[user_id]
@@ -1563,10 +1586,10 @@ async def get_target_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         get_dm_thread_url, user_id, acc['ig_username'], acc['password'], target_u
     )
     if not thread_url:
-        await update.message.reply_text("❌ Could not lock thread id with default account.")
+        await reply_with_mention(update, "❌ Could not lock thread id with default account.")
         return ConversationHandler.END
     context.user_data['thread_url'] = thread_url
-    await update.message.reply_text("Send messages like: msg1 & msg2 & msg3 or upload .txt file")
+    await reply_with_mention(update, "Send messages like: msg1 & msg2 & msg3 or upload .txt file")
     return MESSAGES
     
 async def get_messages_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1574,7 +1597,7 @@ async def get_messages_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     document = update.message.document
 
     if not document:
-        await update.message.reply_text("❌ Please upload a .txt file.")
+        await reply_with_mention(update, "❌ Please upload a .txt file.")
         return ConversationHandler.END
 
     file = await document.get_file()
@@ -1583,39 +1606,51 @@ async def get_messages_file(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     randomid = str(uuid.uuid4())[:8]
     names_file = f"{user_id}_{randomid}.txt"
 
+    # Save uploaded .txt file
     await file.download_to_drive(names_file)
 
+    # store file path in context so get_messages can use it
     context.user_data['uploaded_names_file'] = names_file
 
+    # Reuse same logic as text handler
     return await get_messages(update, context)
 
 async def get_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+    group_id = update.effective_chat.id if chat_type != Chat.PRIVATE else None
 
     import uuid, os, json, time, random
 
+    # Check if we came from file upload handler
     uploaded_file = context.user_data.pop('uploaded_names_file', None)
 
     if uploaded_file and os.path.exists(uploaded_file):
+        # Use already saved .txt file from upload
         names_file = uploaded_file
         raw_text = f"[USING_UPLOADED_FILE:{os.path.basename(uploaded_file)}]"
         logging.debug("USING UPLOADED FILE: %r", uploaded_file)
     else:
+        # Normal text input flow
         raw_text = (update.message.text or "").strip()
         logging.debug("RAW MESSAGES INPUT: %r", raw_text)
 
+        # Normalize to handle fullwidth & etc.
         text = unicodedata.normalize("NFKC", raw_text)
 
+        # Always make a temp file
         randomid = str(uuid.uuid4())[:8]
         names_file = f"{user_id}_{randomid}.txt"
 
+        # ✅ Write raw text directly so msgb.py handles splitting correctly
         try:
             with open(names_file, 'w', encoding='utf-8') as f:
                 f.write(text)
         except Exception as e:
-            await update.message.reply_text(f"❌ Error creating file: {e}")
+            await reply_with_mention(update, f"❌ Error creating file: {e}")
             return ConversationHandler.END
 
+    # --- Below part unchanged (keeps rotation, task limits, etc.) ---
     data = users_data[user_id]
     pairs = data.get('pairs')
     pair_list = pairs['list'] if pairs else [data['accounts'][data['default']]['ig_username']]
@@ -1626,20 +1661,20 @@ async def get_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     switch_minutes = data.get('switch_minutes', 10)
     threads_n = data.get('threads', 1)
     
-    chat_type = update.effective_chat.type
-    
+    # Different task limits for DM vs GC
     if chat_type == Chat.PRIVATE:
         tasks = users_tasks.get(user_id, [])
         running_msg = [t for t in tasks if t.get('type') == 'message_attack' and t['status'] == 'running' and t['proc'].poll() is None]
         if len(running_msg) >= 5:
-            await update.message.reply_text("⚠️ Max 5 message attacks running. Stop one first. ⚠️")
+            await reply_with_mention(update, "⚠️ Max 5 message attacks running. Stop one first. ⚠️")
             if os.path.exists(names_file):
                 os.remove(names_file)
             return ConversationHandler.END
     else:
+        # In GC, user can only have 1 task
         user_gc_tasks = [t for t in gc_tasks_global if t['user_id'] == user_id and t['status'] == 'running']
         if len(user_gc_tasks) >= 1:
-            await update.message.reply_text("⚠️ Only 1 task allowed per user. To buy paid IG spam bot DM @spyther ⚠️")
+            await reply_with_mention(update, "⚠️ Only 1 task allowed per user. To buy paid IG spam bot DM @spyther ⚠️")
             if os.path.exists(names_file):
                 os.remove(names_file)
             return ConversationHandler.END
@@ -1675,7 +1710,7 @@ async def get_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     task = {
         "id": task_id,
         "user_id": user_id,
-        "group_id": update.effective_chat.id if chat_type != Chat.PRIVATE else None,
+        "group_id": group_id,
         "type": "message_attack",
         "pair_list": pair_list,
         "pair_index": start_idx,
@@ -1700,9 +1735,8 @@ async def get_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     save_persistent_tasks()
     
     if chat_type == Chat.PRIVATE:
-        if user_id not in users_tasks:
-            users_tasks[user_id] = []
-        users_tasks[user_id].append(task)
+        tasks.append(task)
+        users_tasks[user_id] = tasks
     else:
         gc_tasks_global.append(task)
     
@@ -1717,7 +1751,7 @@ async def get_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             status += f"cooldown - {u}\n"
     status += f"To stop 🛑 type /stop {task['display_pid']} or /stop all to stop all processes."
 
-    sent_msg = await update.message.reply_text(warning + status)
+    sent_msg = await reply_with_mention(update, warning + status)
     task['status_chat_id'] = update.message.chat_id
     task['status_msg_id'] = sent_msg.message_id
     return ConversationHandler.END
@@ -1730,9 +1764,14 @@ def load_persistent_tasks():
     else:
         persistent_tasks = []
     
+    # Initialize gc_tasks_global from persistent_tasks
     gc_tasks_global = [t for t in persistent_tasks if t.get('group_id')]
 
 def save_persistent_tasks():
+    """
+    Safely write persistent_tasks to TASKS_FILE.
+    Removes runtime-only values (like 'proc') and ensures JSON-safe data.
+    """
     safe_list = []
     for t in persistent_tasks:
         cleaned = {}
@@ -1762,6 +1801,7 @@ def mark_task_stopped_persistent(task_id: str):
             save_persistent_tasks()
             break
     
+    # Also remove from gc_tasks_global
     gc_tasks_global[:] = [t for t in gc_tasks_global if t['id'] != task_id]
 
 def update_task_pid_persistent(task_id: str, new_pid: int):
@@ -1780,6 +1820,7 @@ def mark_task_completed_persistent(task_id: str):
             save_persistent_tasks()
             break
     
+    # Also remove from gc_tasks_global
     gc_tasks_global[:] = [t for t in gc_tasks_global if t['id'] != task_id]
 
 def restore_tasks_on_start():
@@ -1792,7 +1833,7 @@ def restore_tasks_on_start():
                 os.kill(old_pid, signal.SIGTERM)
                 time.sleep(1)
             except OSError:
-                pass
+                pass  # Already dead
             user_id = task['user_id']
             data = users_data.get(user_id)
             if not data:
@@ -1817,6 +1858,7 @@ def restore_tasks_on_start():
                     json.dump(curr_acc['storage_state'], f)
             names_file = task['names_file']
             if not os.path.exists(names_file):
+                # Recreate if missing? But skip for now
                 mark_task_stopped_persistent(task['id'])
                 continue
             cmd = [
@@ -1831,6 +1873,7 @@ def restore_tasks_on_start():
             ]
             try:
                 proc = subprocess.Popen(cmd)
+                # Register runtime map
                 running_processes[proc.pid] = proc
                 new_pid = proc.pid
                 update_task_pid_persistent(task['id'], new_pid)
@@ -1839,6 +1882,7 @@ def restore_tasks_on_start():
                 mem_task['proc_list'] = [proc.pid]
                 mem_task['display_pid'] = task.get('display_pid', proc.pid)
                 
+                # Restore to appropriate list
                 if task.get('group_id'):
                     gc_tasks_global.append(mem_task)
                 else:
@@ -1883,6 +1927,7 @@ def get_switch_update(task: Dict) -> str:
 def switch_task_sync(task: Dict):
     user_id = task['user_id']
 
+    # Keep reference to old proc (don't terminate it yet)
     try:
         old_proc = task.get('proc')
         old_pid = task.get('pid')
@@ -1890,6 +1935,7 @@ def switch_task_sync(task: Dict):
         old_proc = None
         old_pid = task.get('pid')
 
+    # Advance index first so new account is chosen
     task['pair_index'] = (task['pair_index'] + 1) % len(task['pair_list'])
     next_u = task['pair_list'][task['pair_index']]
     data = users_data.get(user_id)
@@ -1918,6 +1964,7 @@ def switch_task_sync(task: Dict):
         except Exception as e:
             logging.error(f"Failed to write state file for {next_u}: {e}")
 
+    # Launch new process FIRST so overlap prevents downtime
     new_cmd = [
         "python3", "msg.py",
         "--username", next_u,
@@ -1934,8 +1981,10 @@ def switch_task_sync(task: Dict):
         logging.error(f"Failed to launch new proc for switch to {next_u}: {e}")
         return
 
+    # Append new to proc_list
     task['proc_list'].append(new_proc.pid)
 
+    # Register new proc and update task/persistent info
     running_processes[new_proc.pid] = new_proc
     task['cmd'] = new_cmd
     task['pid'] = new_proc.pid
@@ -1946,19 +1995,23 @@ def switch_task_sync(task: Dict):
     except Exception as e:
         logging.error(f"Failed to update persistent pid for task {task.get('id')}: {e}")
 
+    # Give old proc a short cooldown window before killing it (avoid downtime)
     if old_proc and old_pid != new_proc.pid:
         try:
+            # Allow overlap for a short cooldown
             time.sleep(5)
             try:
                 old_proc.terminate()
             except Exception:
                 pass
+            # wait a bit for graceful shutdown
             time.sleep(2)
             if old_proc.poll() is None:
                 try:
                     old_proc.kill()
                 except Exception:
                     pass
+            # Remove old from proc_list and running_processes
             if old_pid in task['proc_list']:
                 task['proc_list'].remove(old_pid)
             if old_pid in running_processes:
@@ -1966,6 +2019,7 @@ def switch_task_sync(task: Dict):
         except Exception as e:
             logging.error(f"Error while stopping old proc after switch: {e}")
 
+    # Send/update status message (edit if message id present)
     try:
         chat_id = task.get('status_chat_id', user_id)
         msg_id = task.get('status_msg_id')
@@ -1997,6 +2051,7 @@ def switch_monitor():
                         if len(task['pair_list']) > 1:
                             switch_task_sync(task)
         
+        # Also monitor GC tasks
         for task in gc_tasks_global[:]:
             if task.get('type') == 'message_attack' and task['status'] == 'running' and task['proc'].poll() is None:
                 due_time = task['last_switch_time'] + task['switch_minutes'] * 60
@@ -2005,6 +2060,7 @@ def switch_monitor():
                         switch_task_sync(task)
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
@@ -2012,14 +2068,15 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_type = update.effective_chat.type
     
     if not context.args:
-        await update.message.reply_text("❗ Usage: /stop <PID> or /stop all ❗")
+        await reply_with_mention(update, "❗ Usage: /stop <PID> or /stop all ❗")
         return
     
     arg = context.args[0]
     
     if chat_type == Chat.PRIVATE:
+        # DM logic
         if user_id not in users_tasks or not users_tasks[user_id]:
-            await update.message.reply_text("❌ No tasks running. ❌")
+            await reply_with_mention(update, "❌ No tasks running. ❌")
             return
         
         tasks = users_tasks[user_id]
@@ -2032,6 +2089,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await asyncio.sleep(3)
                 if proc.poll() is None:
                     proc.kill()
+                # Remove from runtime map if present
                 pid = task.get('pid')
                 if pid in running_processes:
                     running_processes.pop(pid, None)
@@ -2043,11 +2101,12 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 mark_task_stopped_persistent(task['id'])
                 tasks.remove(task)
                 stopped_count += 1
-            await update.message.reply_text(f"🛑 Stopped all your tasks! ({stopped_count}) 🛑")
+            await reply_with_mention(update, f"🛑 Stopped all your tasks! ({stopped_count}) 🛑")
         elif arg.isdigit():
             pid_to_stop = int(arg)
             stopped_task = None
 
+            # 1) Try users_tasks by display_pid
             for task in tasks[:]:
                 if task.get('display_pid') == pid_to_stop:
                     proc_list = task.get('proc_list', [])
@@ -2076,9 +2135,10 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         os.remove(task['names_file'])
                     stopped_task = task
                     tasks.remove(task)
-                    await update.message.reply_text(f"🛑 Stopped task {pid_to_stop}!")
+                    await reply_with_mention(update, f"🛑 Stopped task {pid_to_stop}!")
                     break
 
+            # 2) If not found, fallback to runtime map for single pid
             if not stopped_task:
                 proc = running_processes.get(pid_to_stop)
                 if proc:
@@ -2093,16 +2153,18 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         if t.get('pid') == pid_to_stop:
                             mark_task_stopped_persistent(t['id'])
                             break
-                    await update.message.reply_text(f"🛑 Stopped task {pid_to_stop}!")
+                    await reply_with_mention(update, f"🛑 Stopped task {pid_to_stop}!")
                     return
 
             if not stopped_task:
-                await update.message.reply_text("⚠️ Task not found. ⚠️")
+                await reply_with_mention(update, "⚠️ Task not found. ⚠️")
         else:
-            await update.message.reply_text("❗ Usage: /stop <PID> or /stop all ❗")
+            await reply_with_mention(update, "❗ Usage: /stop <PID> or /stop all ❗")
         users_tasks[user_id] = tasks
     else:
+        # GC logic
         if arg == 'all':
+            # User can only stop their own tasks in GC
             stopped_count = 0
             for task in gc_tasks_global[:]:
                 if task['user_id'] == user_id:
@@ -2111,6 +2173,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     await asyncio.sleep(3)
                     if proc.poll() is None:
                         proc.kill()
+                    # Remove from runtime map if present
                     pid = task.get('pid')
                     if pid in running_processes:
                         running_processes.pop(pid, None)
@@ -2122,15 +2185,16 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     mark_task_stopped_persistent(task['id'])
                     gc_tasks_global.remove(task)
                     stopped_count += 1
-            await update.message.reply_text(f"🛑 Stopped all your tasks! ({stopped_count}) 🛑")
+            await reply_with_mention(update, f"🛑 Stopped all your tasks! ({stopped_count}) 🛑")
         elif arg.isdigit():
             pid_to_stop = int(arg)
             stopped_task = None
             
+            # Find task by PID and user
             for task in gc_tasks_global[:]:
                 if task.get('display_pid') == pid_to_stop:
                     if task['user_id'] != user_id:
-                        await update.message.reply_text("⚠️ You can't stop other's tasks. ⚠️")
+                        await reply_with_mention(update, "⚠️ You can't stop other's tasks. ⚠️")
                         return
                     
                     proc_list = task.get('proc_list', [])
@@ -2159,15 +2223,16 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         os.remove(task['names_file'])
                     stopped_task = task
                     gc_tasks_global.remove(task)
-                    await update.message.reply_text(f"🛑 Stopped task {pid_to_stop}!")
+                    await reply_with_mention(update, f"🛑 Stopped task {pid_to_stop}!")
                     break
             
             if not stopped_task:
-                await update.message.reply_text("⚠️ Task not found or you don't own it. ⚠️")
+                await reply_with_mention(update, "⚠️ Task not found or you don't own it. ⚠️")
         else:
-            await update.message.reply_text("❗ Usage: /stop <PID> or /stop all ❗")
+            await reply_with_mention(update, "❗ Usage: /stop <PID> or /stop all ❗")
 
 async def task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
@@ -2175,8 +2240,9 @@ async def task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     chat_type = update.effective_chat.type
     
     if chat_type == Chat.PRIVATE:
+        # DM task view
         if user_id not in users_tasks or not users_tasks[user_id]:
-            await update.message.reply_text("❌ No ongoing tasks. ❌")
+            await reply_with_mention(update, "❌ No ongoing tasks. ❌")
             return
         
         tasks = users_tasks[user_id]
@@ -2189,7 +2255,7 @@ async def task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         users_tasks[user_id] = active_tasks
         
         if not active_tasks:
-            await update.message.reply_text("❌ No active tasks. ❌")
+            await reply_with_mention(update, "❌ No active tasks. ❌")
             return
         
         msg = "📋 Your ongoing tasks 📋\n"
@@ -2200,13 +2266,14 @@ async def task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             display_pid = task.get('display_pid', task['pid'])
             msg += f"{i}. PID {display_pid} — {preview} ({ttype})\n"
         
-        await update.message.reply_text(msg)
+        await reply_with_mention(update, msg)
     else:
+        # GC task view - show all tasks in the group
         group_id = update.effective_chat.id
         group_tasks = [t for t in gc_tasks_global if t.get('group_id') == group_id and t['status'] == 'running' and t['proc'].poll() is None]
         
         if not group_tasks:
-            await update.message.reply_text("❌ No ongoing tasks in this group. ❌")
+            await reply_with_mention(update, "❌ No ongoing tasks in this group. ❌")
             return
         
         msg = "📋 Ongoing tasks in this group 📋\n"
@@ -2216,9 +2283,10 @@ async def task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             display_pid = task.get('display_pid', task['pid'])
             msg += f"{i}. 👤 {username} - PID {display_pid} — {tdisplay}\n"
         
-        await update.message.reply_text(msg)
+        await reply_with_mention(update, msg)
 
 async def usg_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
@@ -2227,92 +2295,101 @@ async def usg_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ram_used = mem.used / (1024 ** 3)
     ram_total = mem.total / (1024 ** 3)
     msg = f"🖥️ CPU Usage: {cpu:.1f}%\n💾 RAM: {ram_used:.1f}GB / {ram_total:.1f}GB ({mem.percent:.1f}%)"
-    await update.message.reply_text(msg)
+    await reply_with_mention(update, msg)
 
 async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if user_id in user_fetching:
         user_fetching.discard(user_id)
-        await update.message.reply_text("❌ Fetching cancelled! 🚫")
+        await reply_with_mention(update, "❌ Fetching cancelled! 🚫")
     else:
-        await update.message.reply_text("No active fetching to cancel. 😊")
+        await reply_with_mention(update, "No active fetching to cancel. 😊")
 
 async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if not is_owner(user_id):
-        await update.message.reply_text("⚠️ you are not an admin ⚠️")
+        await reply_with_mention(update, "⚠️ you are not an admin ⚠️")
         return
     
     if len(context.args) != 1:
-        await update.message.reply_text("❗ Usage: /add <tg_id> ❗")
+        await reply_with_mention(update, "❗ Usage: /add <tg_id> ❗")
         return
     
     try:
         tg_id = int(context.args[0])
         
+        # Check if it's a group ID (negative)
         if tg_id < 0:
+            # It's a group
             if tg_id in authorized_groups:
-                await update.message.reply_text("❗ Group already added. ❗")
+                await reply_with_mention(update, "❗ Group already added. ❗")
                 return
             
             authorized_groups.append(tg_id)
             save_authorized_groups()
-            await update.message.reply_text(f"➕ Added group {tg_id} as authorized. ➕")
+            await reply_with_mention(update, f"➕ Added group {tg_id} as authorized. ➕")
         else:
+            # It's a user
             if any(u['id'] == tg_id for u in authorized_users):
-                await update.message.reply_text("❗ User already added. ❗")
+                await reply_with_mention(update, "❗ User already added. ❗")
                 return
             
             authorized_users.append({'id': tg_id, 'username': ''})
             save_authorized()
-            await update.message.reply_text(f"➕ Added {tg_id} as authorized user. ➕")
+            await reply_with_mention(update, f"➕ Added {tg_id} as authorized user. ➕")
     except:
-        await update.message.reply_text("⚠️ Invalid tg_id. ⚠️")
+        await reply_with_mention(update, "⚠️ Invalid tg_id. ⚠️")
 
 async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if not is_owner(user_id):
-        await update.message.reply_text("⚠️ you are not an admin ⚠️")
+        await reply_with_mention(update, "⚠️ you are not an admin ⚠️")
         return
     
     if not context.args or not context.args[0].lstrip('-').isdigit():
-        await update.message.reply_text("❗ Usage: /remove <tg_id> ❗")
+        await reply_with_mention(update, "❗ Usage: /remove <tg_id> ❗")
         return
     
     tg_id = int(context.args[0])
     
+    # Check if it's a group ID (negative)
     if tg_id < 0:
+        # It's a group
         global authorized_groups
         if tg_id in authorized_groups:
             authorized_groups.remove(tg_id)
             save_authorized_groups()
-            await update.message.reply_text(f"➖ Removed group {tg_id} from authorized groups. ➖")
+            await reply_with_mention(update, f"➖ Removed group {tg_id} from authorized groups. ➖")
         else:
-            await update.message.reply_text(f"⚠️ Group {tg_id} not found in authorized groups. ⚠️")
+            await reply_with_mention(update, f"⚠️ Group {tg_id} not found in authorized groups. ⚠️")
     else:
+        # It's a user
         global authorized_users
         before_len = len(authorized_users)
         authorized_users = [u for u in authorized_users if u['id'] != tg_id]
         
         if len(authorized_users) < before_len:
             save_authorized()
-            await update.message.reply_text(f"➖ Removed {tg_id} from authorized users. ➖")
+            await reply_with_mention(update, f"➖ Removed {tg_id} from authorized users. ➖")
         else:
-            await update.message.reply_text(f"⚠️ User {tg_id} not found in authorized users. ⚠️")
+            await reply_with_mention(update, f"⚠️ User {tg_id} not found in authorized users. ⚠️")
 
 async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Check authorization and channel
     if not await can_use_bot(update, context):
         return
     
     user_id = update.effective_user.id
     if not is_owner(user_id):
-        await update.message.reply_text("⚠️ you are not an admin ⚠️")
+        await reply_with_mention(update, "⚠️ you are not an admin ⚠️")
         return
     
     msg = "📜 Authorized users and groups: 📜\n\n"
@@ -2336,7 +2413,7 @@ async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     else:
         msg += "No authorized users (except owner).\n"
     
-    await update.message.reply_text(msg)
+    await reply_with_mention(update, msg)
 
 def main_bot():
     from telegram.request import HTTPXRequest
@@ -2346,13 +2423,17 @@ def main_bot():
     APP = application
     LOOP = asyncio.get_event_loop()
     
+    # Load authorized users and groups
     load_authorized()
     
+    # Restore tasks
     restore_tasks_on_start()
     
+    # Start switch monitor
     monitor_thread = threading.Thread(target=switch_monitor, daemon=True)
     monitor_thread.start()
     
+    # Post init for notifications
     async def post_init(app):
         for user_id, tasks_list in list(users_tasks.items()):
             for task in tasks_list:
@@ -2361,6 +2442,7 @@ def main_bot():
     
     application.post_init = post_init
 
+    # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("viewmyac", viewmyac))
@@ -2381,6 +2463,7 @@ def main_bot():
     application.add_handler(CommandHandler("usg", usg_command))
     application.add_handler(CommandHandler("cancel", cancel_handler))
 
+    # Conversation handlers
     conv_login = ConversationHandler(
         entry_points=[CommandHandler("login", login_start)],
         states={
@@ -2426,6 +2509,7 @@ def main_bot():
     )
     application.add_handler(conv_attack)
 
+    # Text handler for OTP and relay
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("🚀 Bot starting with group chat functionality!")
