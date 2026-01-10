@@ -1,0 +1,101 @@
+Don't touch any previous code or errors; leave them as they are. Even if there are errors from before, don't fix them. Just add these features.
+
+Add the GC (group chat) function as a public service.
+
+With /add, normal users get added.
+
+In this, /add -82381929291 can be a group ID.
+
+It will automatically detect if the owner is adding the group ID, and removal should also be possible in the same way.
+
+And add such a function:
+
+If the group owner has authorized it,
+
+Then users of that group can use the bot.
+
+And there should be a forced channel join: if someone writes /help after /start, it should deny access and say 'join @techyspyther and try again'. If the user has joined the channel, then it will work when they try again.
+
+And there will be a separate authorization system.
+
+Authorized users who are added with /add remain the same; just implement the GC part.
+
+And in DM, if a non-authorized person runs /help or any command, it should say 'this bot can be used in authorized groups'.
+
+
+
+And add this:
+
+In GC, the bot will only accept commands from those who tag or mention it when giving the command, and the bot will also reply by tagging them for all commands. In GC, only 1 task per user is allowed, and the global max tasks are 10. If there are 10 tasks, it should say '10/10 tasks are currently running'.
+
+And if in an authorized GC, a person does /attack but their account isn't saved, the bot should say 'you haven't saved any account yet, DM the bot and login with the following commands: /login /plogin /slogin. The faster and safer method is session ID'.
+
+Only in DM, non-authorized users can run login commands like /slogin /plogin /login; no other commands, but they can run in GC.
+
+And in authorized GC, these same commands will run.
+
+🌟 Available commands: 🌟
+ /help ⚡ - Show this help
+ /login 📱 - Login to Instagram account
+ /plogin 🔐 - Playwright human-like login
+ /slogin 🔑 - Login with session ID
+ /viewmyac 👀 - View your saved accounts
+ /setig 🔄 <number> - Set default account
+ /pair 📦 ig1-ig2 - Create account pair for rotation
+ /unpair ✨ - to unpair paired accounts (unpair all or unpair <account>
+ /switch ⏱️ <min> - Set switch interval (5+ min)
+ /threads 🔢 <1-5> - Set number of threads
+ /viewpref ⚙️ - View preferences
+ /attack 💥 - Start sending messages
+ /stop 🛑 <pid/all> - Stop tasks
+ /task 📋 - View ongoing tasks
+ /logout 🚪 <username> - Logout and remove account
+ /kill 🛑 - Kill active login session
+ /usg 📊 - System usage
+
+
+If the user does /threads 2 or 4, it should say '/threads unavailable for authorized GCs, only 1 thread is allowed per user. To buy full speed threads, bot DM @spyther'.
+
+User can do /threads 1 per user only.
+
+Other commands will run in authorized GC.
+
+
+And when users in GC write /task, it should show differently: all tasks that GC users have started, with their username along with the task and list number.
+
+When a user in GC does /attack while they already have their max 1 attack running from before, it should say 'only 1 task allowed per user, to buy paid IG spam bot DM @spyther'.
+
+And in this, it should be like this:
+
+When a GC user's task ID appears like this:
+
+⚠️ Warning: You may get chat ban if you use a single account too long. Use /pair to make multi-account rotation.
+
+Spamming...!
+using - hsjshsj7728
+To stop 🛑 type /stop 489311 or /stop all to stop all processes.
+
+
+Then, only the user who did the attack can stop their task with /stop (pid) and /stop all.
+
+Like that....
+
+If another user tries /stop pid of someone else's, it should say 'you can't stop other's tasks'.
+
+And in this,
+
+In every authorized GC, each user can stop their own task.
+
+
+And owner commands can't be run in normal user GC either; it should say 'you are not an owner'.
+
+And all commands and actions for GC that I have told you, should be according to their conditions, with emojis filled as they are from before, ok.
+
+
+Everyone can see their own /viewmyac and other things; everything per user, everyone's own, and commands like /slogin /plogin /login can be run in GC too.... but for the safe method, the bot should say to login in the bot's DM without exposing it.
+
+Don't make any other changes; just add what I have said....
+
+Now do a full recode with it, return single.py
+
+If there is something like a DB, it will automatically be created if it doesn't exist....
