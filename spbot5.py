@@ -784,12 +784,12 @@ PLO_USERNAME, PLO_PASSWORD = range(2)
 SLOG_SESSION, SLOG_USERNAME = range(2)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("Welcome to Baby's spam bot ⚡ type /help to see available commands")
+    await update.message.reply_text("Welcome to Spyther's spam bot ⚡ type /help to see available commands")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     help_text = """
 🌟 Available commands: 🌟
@@ -824,7 +824,7 @@ Admin commands: 👑
 async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return ConversationHandler.END
     await update.message.reply_text("📱 Enter Instagram username: 📱")
     return USERNAME
@@ -867,7 +867,7 @@ async def get_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def plogin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return ConversationHandler.END
 
     await update.message.reply_text("🔐 Enter Instagram username for Playwright login: ")
@@ -973,7 +973,7 @@ async def plogin_get_password(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def slogin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return ConversationHandler.END
     await update.message.reply_text("🔑 Enter session ID: ")
     return SLOG_SESSION
@@ -1037,7 +1037,7 @@ async def slogin_get_username(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def viewmyac(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     if user_id not in users_data:
         await update.message.reply_text("❌ You haven't saved any account. Use /login to save one. ❌")
@@ -1052,7 +1052,7 @@ async def viewmyac(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def setig(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text("❗ Usage: /setig <number> ❗")
@@ -1073,7 +1073,7 @@ async def setig(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     if not context.args:
         await update.message.reply_text("❗ Usage: /logout <username> ❗")
@@ -1116,7 +1116,7 @@ async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def pair_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther⚠️")
         return
     if not context.args:
         await update.message.reply_text("❗ Usage: /pair iguser1-iguser2-iguser3 ❗")
@@ -1148,7 +1148,7 @@ async def pair_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def unpair_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
 
     if user_id not in users_data or not users_data[user_id].get('pairs'):
@@ -1200,7 +1200,7 @@ async def unpair_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def switch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text("❗ Usage: /switch <minutes> ❗")
@@ -1220,7 +1220,7 @@ async def switch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def threads_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text("❗ Usage: /threads <1-5> ❗")
@@ -1240,7 +1240,7 @@ async def threads_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def viewpref(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     if user_id not in users_data:
         await update.message.reply_text("❌ No data. Use /login. ❌")
@@ -1287,7 +1287,7 @@ MODE, SELECT_GC, TARGET, MESSAGES = range(4)
 async def attack_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return ConversationHandler.END
     if user_id not in users_data or not users_data[user_id]['accounts']:
         await update.message.reply_text("❗ Please /login first. ❗")
@@ -1824,7 +1824,7 @@ def switch_monitor():
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     if not context.args:
         await update.message.reply_text("❗ Usage: /stop <PID> or /stop all ❗")
@@ -1918,7 +1918,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     if user_id not in users_tasks or not users_tasks[user_id]:
         await update.message.reply_text("❌ No ongoing tasks. ❌")
@@ -1945,7 +1945,7 @@ async def task_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def usg_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @Banypagal ⚠️")
+        await update.message.reply_text("⚠️ You are not authorised to use, dm owner to gain access! @spyther ⚠️")
         return
     cpu = psutil.cpu_percent(interval=1)
     mem = psutil.virtual_memory()
